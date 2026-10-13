@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "youtube",
+      "name": "YouTube и Google",
+      "android_packages": ["com.google.android.youtube", "com.google.android.apps.youtube.music", "com.google.android.gms"],
+      "domains": ["youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "youtu.be"],
+      "block_quic": true,
+      "strategies": ["split+tlsrec", "fake+disorder", "oob"]
+    },
+    {
+      "id": "whatsapp",
+      "name": "WhatsApp",
+      "android_packages": ["com.whatsapp", "com.whatsapp.w4b"],
+      "domains": ["whatsapp.com", "whatsapp.net", "wa.me"],
+      "block_quic": false,
+      "strategies": ["split", "disorder", "fake+tlsrec"]
+    },
+    {
+      "id": "telegram",
+      "name": "Telegram",
+      "android_packages": ["org.telegram.messenger", "org.telegram.messenger.web", "org.thunderdog.challegram"],
+      "domains": ["telegram.org", "t.me", "telegra.ph"],
+      "block_quic": false,
+      "strategies": ["split", "disorder"]
+    }
+  ]
+}
