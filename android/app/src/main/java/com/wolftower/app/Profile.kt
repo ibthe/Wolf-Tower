@@ -9,6 +9,7 @@ data class Profile(
     val name: String,
     val packages: List<String>,
     val domains: List<String>,
+    val ipRanges: List<String>,
     val probeHosts: List<String>,
     val blockQuic: Boolean,
 )
@@ -33,6 +34,7 @@ object ProfilesRepository {
                 name = o.getString("name"),
                 packages = o.optJSONArray("android_packages").strings(),
                 domains = o.optJSONArray("domains").strings(),
+                ipRanges = o.optJSONArray("ip_ranges").strings(),
                 probeHosts = o.optJSONArray("probe_hosts").strings(),
                 blockQuic = o.optBoolean("block_quic", false),
             )

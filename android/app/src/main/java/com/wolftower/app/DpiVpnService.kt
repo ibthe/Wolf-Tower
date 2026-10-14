@@ -2,8 +2,11 @@ package com.wolftower.app
 
 import android.content.Intent
 import android.net.VpnService
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlin.concurrent.thread
 
 class DpiVpnService : VpnService() {
 
@@ -23,6 +26,7 @@ class DpiVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private var byeDpi: ByeDpiProcess? = null
     private lateinit var tun2socks: Tun2Socks
+    private var guardThread: Thread? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -41,6 +45,11 @@ class DpiVpnService : VpnService() {
 
     private fun startAll() {
         if (running.value) return
+        if (!LicenseManager.canRun(this)) {
+            appendLog("Нужен лицензионный ключ")
+            stopSelf()
+            return
+        }
         val config = ProfilesRepository.load(this)
         val enabled = Settings.enabledIds(this)
         val chosen = config.profiles.filter { it.id in enabled }
@@ -53,8 +62,9 @@ class DpiVpnService : VpnService() {
         val selection = chosen.map { it to Settings.strategyFor(this, it.id, config.defaultStrategy) }
         appendLog("Стратегии: " + selection.joinToString { "${it.first.name}=${it.second}" })
 
-        // Если у всех выбранных сервисов block_quic, запрещаем UDP, чтобы QUIC откатился на TCP
-        val noUdp = if (chosen.all { it.blockQuic }) listOf("-U") else emptyList()
+        // Запрет UDP (QUIC): по выбору пользователя, а если не задано, то когда его хотят все сервисы
+        val blockQuic = Settings.blockQuicPref(this) ?: chosen.all { it.blockQuic }
+        val noUdp = if (blockQuic) listOf("-U") else emptyList()
         val args = noUdp + StrategyArgs.buildGroups(selection)
 
         val proc = ByeDpiProcess(this)
@@ -91,10 +101,34 @@ class DpiVpnService : VpnService() {
         tun2socks.start(fd, "127.0.0.1", SOCKS_PORT, ::appendLog)
         running.value = true
         appendLog("Запущено. Сервисы: ${chosen.joinToString { it.name }}")
+        startClockGuard()
+    }
+
+    /** Раз в 30 минут сверяет часы с сетью; при откате времени деактивирует ключ и останавливает защиту. */
+    private fun startClockGuard() {
+        guardThread?.interrupt()
+        guardThread = thread(isDaemon = true) {
+            try {
+                while (true) {
+                    Thread.sleep(30L * 60 * 1000)
+                    if (LicenseManager.networkCheck(this@DpiVpnService) == NetCheck.BEHIND) {
+                        appendLog("Время отстаёт от сетевого, ключ деактивирован")
+                        Handler(Looper.getMainLooper()).post {
+                            stopAll()
+                            stopSelf()
+                        }
+                        break
+                    }
+                }
+            } catch (_: InterruptedException) {
+            }
+        }
     }
 
     /** Безопасно вызывать несколько раз: каждый шаг защищён, чтобы остановка не роняла приложение. */
     private fun stopAll() {
+        guardThread?.interrupt()
+        guardThread = null
         runCatching { tun2socks.stop() }
         runCatching { byeDpi?.stop() }
         byeDpi = null

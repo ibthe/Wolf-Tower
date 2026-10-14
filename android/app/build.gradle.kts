@@ -16,6 +16,24 @@ android {
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
+    // Стабильная подпись APK (нужна, чтобы ID устройства в лицензиях не менялся между сборками
+    // и обновления ставились поверх). Включается, если заданы переменные окружения WT_*.
+    val keystorePath: String? = System.getenv("WT_KEYSTORE_FILE")
+    if (keystorePath != null && file(keystorePath).exists()) {
+        val wtSigning = signingConfigs.create("wt") {
+            storeFile = file(keystorePath)
+            storePassword = System.getenv("WT_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("WT_KEY_ALIAS")
+            keyPassword = System.getenv("WT_KEY_PASSWORD")
+        }
+        buildTypes {
+            getByName("debug") { signingConfig = wtSigning }
+            getByName("release") { signingConfig = wtSigning }
+        }
+    }
+
+    lint { checkReleaseBuilds = false }
+
     externalNativeBuild {
         cmake { path = file("src/main/cpp/CMakeLists.txt") }
     }

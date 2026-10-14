@@ -26,16 +26,23 @@ object StrategyArgs {
 
     /**
      * Своя стратегия для каждого сервиса: группы опций ByeDPI, разделённые --auto=none.
-     * Группа применяется только к доменам сервиса (по SNI), остальной трафик идёт без изменений.
+     * Группа по доменам срабатывает по SNI. Для сервисов с ip_ranges (Telegram подключается по IP
+     * без имени сайта) добавляется вторая группа с фильтром по IP-диапазонам: в ByeDPI фильтры
+     * внутри одной группы работают по "И", поэтому домены и IP идут отдельными группами.
+     * Остальной трафик идёт без изменений.
      */
     fun buildGroups(selection: List<Pair<Profile, String>>): List<String> {
-        val groups = selection.filter { it.second != "none" && it.first.domains.isNotEmpty() }
         val out = ArrayList<String>()
-        groups.forEachIndexed { i, (profile, strategy) ->
-            if (i > 0) out.add("--auto=none")
-            out.add("--hosts")
-            out.add(":" + profile.domains.joinToString(" "))
+        fun group(filterFlag: String, filterValue: String, strategy: String) {
+            if (out.isNotEmpty()) out.add("--auto=none")
+            out.add(filterFlag)
+            out.add(":$filterValue")
             out.addAll(forName(strategy))
+        }
+        for ((profile, strategy) in selection) {
+            if (strategy == "none") continue
+            if (profile.domains.isNotEmpty()) group("--hosts", profile.domains.joinToString(" "), strategy)
+            if (profile.ipRanges.isNotEmpty()) group("--ipset", profile.ipRanges.joinToString(" "), strategy)
         }
         return out
     }

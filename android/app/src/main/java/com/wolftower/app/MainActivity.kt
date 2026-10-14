@@ -26,6 +26,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,7 +39,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.unit.dp
+import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,10 +60,28 @@ class MainActivity : ComponentActivity() {
                 config.profiles.associate { it.id to Settings.strategyFor(ctx, it.id, config.defaultStrategy) }
             )
         }
+        var blockQuicPref by remember { mutableStateOf(Settings.blockQuicPref(ctx)) }
         var crash by remember { mutableStateOf(CrashInfo.read(ctx)) }
+        var status by remember { mutableStateOf(LicenseManager.status(ctx)) }
+        var keyInput by remember { mutableStateOf("") }
+        var licenseMsg by remember { mutableStateOf<String?>(null) }
+        var showKeyField by remember { mutableStateOf(status !is LicenseStatus.Licensed) }
+        var showLicenses by remember { mutableStateOf(false) }
+        var busy by remember { mutableStateOf(false) }
+        val clipboard = LocalClipboardManager.current
         val running by DpiVpnService.running.collectAsState()
         val log by DpiVpnService.log.collectAsState()
         val probe by AutoProbe.state.collectAsState()
+        val canRun = status.canRun
+
+        // Сверка часов с сетью при открытии приложения и обновление статуса после остановки защиты
+        LaunchedEffect(Unit) {
+            thread(isDaemon = true) {
+                LicenseManager.networkCheck(ctx)
+                runOnUiThread { status = LicenseManager.status(ctx) }
+            }
+        }
+        LaunchedEffect(running) { status = LicenseManager.status(ctx) }
 
         // После автоподбора подтягиваем выбранные стратегии в интерфейс
         LaunchedEffect(probe.done) {
@@ -84,6 +105,53 @@ class MainActivity : ComponentActivity() {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("Wolf Tower", style = MaterialTheme.typography.headlineSmall)
+
+            // ---------- Лицензия ----------
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Лицензия", style = MaterialTheme.typography.titleMedium)
+                    Text(LicenseManager.describe(status), style = MaterialTheme.typography.bodyMedium)
+                    if (status is LicenseStatus.Licensed && !showKeyField) {
+                        TextButton(onClick = { showKeyField = true }) { Text("Ввести новый ключ") }
+                    }
+                    if (showKeyField) {
+                        SelectionContainer {
+                            Text(
+                                "ID устройства: ${LicenseManager.deviceId(ctx)} (сообщите при покупке ключа, привязанного к устройству)",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        OutlinedTextField(
+                            value = keyInput,
+                            onValueChange = { keyInput = it },
+                            label = { Text("Лицензионный ключ") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                enabled = keyInput.isNotBlank() && !busy,
+                                onClick = {
+                                    busy = true
+                                    val input = keyInput
+                                    thread(isDaemon = true) {
+                                        val error = LicenseManager.activate(ctx, input)
+                                        runOnUiThread {
+                                            licenseMsg = error ?: "Ключ принят"
+                                            if (error == null) keyInput = ""
+                                            status = LicenseManager.status(ctx)
+                                            busy = false
+                                        }
+                                    }
+                                },
+                            ) { Text(if (busy) "Проверка…" else "Активировать") }
+                            OutlinedButton(onClick = {
+                                clipboard.getText()?.text?.let { keyInput = it.trim() }
+                            }) { Text("Вставить") }
+                        }
+                        licenseMsg?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
+            }
 
             if (crash != null) {
                 Card(Modifier.fillMaxWidth()) {
@@ -141,9 +209,37 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // ---------- QUIC ----------
+            val autoQuic = config.profiles.filter { it.id in enabled }.let { sel ->
+                sel.isNotEmpty() && sel.all { it.blockQuic }
+            }
+            Card(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Блокировать QUIC (UDP)", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Помогает YouTube и Instagram откатиться на TCP. Ломает звонки WhatsApp.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(
+                        checked = blockQuicPref ?: autoQuic,
+                        enabled = !running,
+                        onCheckedChange = {
+                            Settings.setBlockQuic(ctx, it)
+                            blockQuicPref = it
+                        },
+                    )
+                }
+            }
+
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !running && !probe.running && enabled.isNotEmpty(),
+                enabled = !running && !probe.running && enabled.isNotEmpty() && canRun,
                 onClick = {
                     AutoProbe.start(
                         ctx.applicationContext,
@@ -171,21 +267,43 @@ class MainActivity : ComponentActivity() {
 
             Button(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !probe.running,
+                enabled = !probe.running && !busy && (running || canRun),
                 onClick = {
                     if (running) {
                         startService(
                             Intent(ctx, DpiVpnService::class.java).setAction(DpiVpnService.ACTION_STOP)
                         )
                     } else {
-                        val prepare = VpnService.prepare(ctx)
-                        if (prepare != null) vpnPermission.launch(prepare) else startVpn()
+                        busy = true
+                        thread(isDaemon = true) {
+                            LicenseManager.networkCheck(ctx)
+                            runOnUiThread {
+                                status = LicenseManager.status(ctx)
+                                busy = false
+                                if (status.canRun) {
+                                    val prepare = VpnService.prepare(ctx)
+                                    if (prepare != null) vpnPermission.launch(prepare) else startVpn()
+                                }
+                            }
+                        }
                     }
                 },
             ) { Text(if (running) "Остановить" else "Запустить") }
 
             Text("Лог", style = MaterialTheme.typography.titleSmall)
             Text(log.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
+
+            TextButton(onClick = { showLicenses = !showLicenses }) { Text("Лицензии компонентов") }
+            if (showLicenses) {
+                val text = remember {
+                    try {
+                        ctx.assets.open("third_party_licenses.txt").bufferedReader().use { it.readText() }
+                    } catch (_: Exception) {
+                        "Не удалось прочитать файл лицензий"
+                    }
+                }
+                SelectionContainer { Text(text, style = MaterialTheme.typography.bodySmall) }
+            }
         }
     }
 }

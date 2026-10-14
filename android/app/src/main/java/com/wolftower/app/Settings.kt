@@ -18,4 +18,13 @@ object Settings {
 
     fun setStrategyFor(ctx: Context, profileId: String, strategy: String) =
         prefs(ctx).edit().putString("strategy_$profileId", strategy).apply()
+
+    /** null = автоматически (по block_quic выбранных сервисов). */
+    fun blockQuicPref(ctx: Context): Boolean? {
+        val p = prefs(ctx)
+        return if (p.contains("block_quic")) p.getBoolean("block_quic", false) else null
+    }
+
+    fun setBlockQuic(ctx: Context, value: Boolean) =
+        prefs(ctx).edit().putBoolean("block_quic", value).apply()
 }

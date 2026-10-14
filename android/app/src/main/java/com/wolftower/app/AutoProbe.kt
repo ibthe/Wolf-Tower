@@ -124,7 +124,9 @@ object AutoProbe {
                 }
             }
             if (best == null) {
-                lines.add("${profile.name}: ничего не сработало (0/$total). Возможна блокировка по IP или подмена DNS.")
+                state.value = state.value.copy(progress = "Диагностика: ${profile.name}…")
+                val host = profile.probeHosts.first()
+                lines.add("${profile.name}: ничего не сработало (0/$total).\n   Диагностика $host: ${Diagnose.verdict(host)}")
             } else {
                 Settings.setStrategyFor(ctx, profile.id, best)
                 scores[profile.id] = "$bestOk/$total"
