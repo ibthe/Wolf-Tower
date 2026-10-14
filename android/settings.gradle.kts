@@ -6,3 +6,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "wolftower"
 include(":app")
+include(":tun2socks")

@@ -22,7 +22,12 @@ class DpiVpnService : VpnService() {
 
     private var tun: ParcelFileDescriptor? = null
     private var byeDpi: ByeDpiProcess? = null
-    private val tun2socks: Tun2Socks = PlaceholderTun2Socks()
+    private lateinit var tun2socks: Tun2Socks
+
+    override fun onCreate() {
+        super.onCreate()
+        tun2socks = HevTun2Socks(this)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -57,10 +62,10 @@ class DpiVpnService : VpnService() {
 
         val builder = Builder()
             .setSession("Wolf Tower")
-            .addAddress("10.10.10.10", 32)
+            .addAddress(HevTun2Socks.TUN_ADDRESS, 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer("1.1.1.1")
-            .setMtu(1500)
+            .addDnsServer(HevTun2Socks.MAPDNS_ADDRESS)
+            .setMtu(HevTun2Socks.MTU)
 
         // Только выбранные сервисы идут через туннель, остальной трафик напрямую
         for (pkg in chosen.flatMap { it.packages }.distinct()) {

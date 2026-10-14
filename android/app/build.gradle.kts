@@ -36,6 +36,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":tun2socks"))
     val bom = platform("androidx.compose:compose-bom:2024.06.00")
     implementation(bom)
     implementation("androidx.compose.material3:material3")
