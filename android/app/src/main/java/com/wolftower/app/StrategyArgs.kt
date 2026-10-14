@@ -2,7 +2,7 @@ package com.wolftower.app
 
 /**
  * Преобразует имя стратегии из profiles.json в аргументы ByeDPI (ciadpi).
- * ВАЖНО: сверь флаги с `ciadpi --help` вашей версии third_party/byedpi.
+ * Флаги сверены с `ciadpi --help` (коммит ba53229). Их эффективность зависит от оператора.
  * "+s" = смещение считается от начала SNI.
  */
 object StrategyArgs {

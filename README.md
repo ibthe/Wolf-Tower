@@ -6,7 +6,8 @@
 Подробности архитектуры: SPEC.md.
 
 ## Сборка
-    git submodule update --init --recursive
     gradle -p android assembleDebug
+
+Исходники ByeDPI лежат в third_party/byedpi (MIT, коммит ba53229 репозитория hufrea/byedpi).
 
 Компоненты: ByeDPI (MIT), zapret (MIT), hev-socks5-tunnel (MIT), WinDivert (LGPL-3 / GPL-2).

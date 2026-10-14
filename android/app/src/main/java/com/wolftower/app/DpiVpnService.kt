@@ -46,7 +46,9 @@ class DpiVpnService : VpnService() {
         }
 
         val proc = ByeDpiProcess(this)
-        val args = StrategyArgs.forName(Settings.strategy(this))
+        // Если у всех выбранных сервисов block_quic, запрещаем UDP, чтобы QUIC откатился на TCP
+        val noUdp = if (chosen.all { it.blockQuic }) listOf("-U") else emptyList()
+        val args = noUdp + StrategyArgs.forName(Settings.strategy(this))
         if (!proc.start(SOCKS_PORT, args, ::appendLog)) {
             stopSelf()
             return
