@@ -14,6 +14,8 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # На ubuntu-latest Android SDK уже установлен (ANDROID_HOME),
+      # поэтому отдельный setup-android не нужен: он падает на пакете 'tools'.
       - name: Install NDK and CMake
         run: |
           SDKM=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -1)
