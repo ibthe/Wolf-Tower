@@ -10,4 +10,4 @@
 
 Исходники ByeDPI лежат в third_party/byedpi (MIT, коммит ba53229 репозитория hufrea/byedpi).
 
-Компоненты: ByeDPI (MIT), zapret (MIT), hev-socks5-tunnel (MIT), WinDivert (LGPL-3 / GPL-2).
+Компоненты: ByeDPI (MIT), zapret (MIT), hev-socks5-tunnel (MIT, вендорен в third_party), WinDivert (LGPL-3 / GPL-2).
