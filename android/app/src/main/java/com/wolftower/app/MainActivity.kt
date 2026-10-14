@@ -8,88 +8,183 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val profiles = ProfilesRepository.load(this)
-        setContent { MaterialTheme { Screen(profiles) } }
+        val config = ProfilesRepository.load(this)
+        setContent { MaterialTheme { Screen(config) } }
     }
 
-    @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+    @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
     @Composable
-    private fun Screen(profiles: List<Profile>) {
-        var enabled by remember { mutableStateOf(Settings.enabledIds(this)) }
-        var strategy by remember { mutableStateOf(Settings.strategy(this)) }
+    private fun Screen(config: ProfilesConfig) {
+        val ctx = this
+        var enabled by remember { mutableStateOf(Settings.enabledIds(ctx)) }
+        var strategies by remember {
+            mutableStateOf(
+                config.profiles.associate { it.id to Settings.strategyFor(ctx, it.id, config.defaultStrategy) }
+            )
+        }
+        var crash by remember { mutableStateOf(CrashInfo.read(ctx)) }
         val running by DpiVpnService.running.collectAsState()
         val log by DpiVpnService.log.collectAsState()
+        val probe by AutoProbe.state.collectAsState()
 
-        val strategies = profiles.filter { it.id in enabled }
-            .flatMap { it.strategies }.distinct()
-            .ifEmpty { profiles.flatMap { it.strategies }.distinct() }
+        // После автоподбора подтягиваем выбранные стратегии в интерфейс
+        LaunchedEffect(probe.done) {
+            if (probe.done) {
+                strategies = config.profiles.associate {
+                    it.id to Settings.strategyFor(ctx, it.id, config.defaultStrategy)
+                }
+            }
+        }
 
-        fun startService() {
-            startService(Intent(this, DpiVpnService::class.java).setAction(DpiVpnService.ACTION_START))
+        fun startVpn() {
+            startService(Intent(ctx, DpiVpnService::class.java).setAction(DpiVpnService.ACTION_START))
         }
 
         val vpnPermission = rememberLauncherForActivityResult(
             ActivityResultContracts.StartActivityForResult()
-        ) { r -> if (r.resultCode == Activity.RESULT_OK) startService() }
+        ) { r -> if (r.resultCode == Activity.RESULT_OK) startVpn() }
 
         Column(
             Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Сервисы", style = MaterialTheme.typography.titleLarge)
-            profiles.forEach { p ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(p.name)
-                    Switch(
-                        checked = p.id in enabled,
-                        enabled = !running,
-                        onCheckedChange = { on ->
-                            enabled = if (on) enabled + p.id else enabled - p.id
-                            Settings.setEnabledIds(this@MainActivity, enabled)
-                        },
-                    )
+            Text("Wolf Tower", style = MaterialTheme.typography.headlineSmall)
+
+            if (crash != null) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Последний сбой (можно скопировать и прислать)", style = MaterialTheme.typography.titleSmall)
+                        SelectionContainer { Text(crash ?: "", style = MaterialTheme.typography.bodySmall) }
+                        TextButton(onClick = {
+                            CrashInfo.dismiss(ctx)
+                            crash = null
+                        }) { Text("Скрыть") }
+                    }
                 }
             }
 
-            Text("Стратегия", style = MaterialTheme.typography.titleMedium)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                strategies.forEach { s ->
-                    FilterChip(
-                        selected = s == strategy,
-                        enabled = !running,
-                        onClick = { strategy = s; Settings.setStrategy(this@MainActivity, s) },
-                        label = { Text(s) },
-                    )
+            config.profiles.forEach { p ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(p.name, style = MaterialTheme.typography.titleMedium)
+                            Switch(
+                                checked = p.id in enabled,
+                                enabled = !running,
+                                onCheckedChange = { on ->
+                                    enabled = if (on) enabled + p.id else enabled - p.id
+                                    Settings.setEnabledIds(ctx, enabled)
+                                },
+                            )
+                        }
+                        if (p.id in enabled) {
+                            val current = strategies[p.id] ?: config.defaultStrategy
+                            val score = probe.scores[p.id]?.let { " (проверка: $it)" } ?: ""
+                            Text(
+                                "Стратегия: " + (if (current == "none") "без обхода" else current) + score,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                (listOf("none") + config.strategies).forEach { s ->
+                                    FilterChip(
+                                        selected = s == current,
+                                        enabled = !running,
+                                        onClick = {
+                                            Settings.setStrategyFor(ctx, p.id, s)
+                                            strategies = strategies + (p.id to s)
+                                        },
+                                        label = { Text(if (s == "none") "без обхода" else s) },
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !running && !probe.running && enabled.isNotEmpty(),
+                onClick = {
+                    AutoProbe.start(
+                        ctx.applicationContext,
+                        config.profiles.filter { it.id in enabled },
+                        config.strategies,
+                    )
+                },
+            ) { Text("Подобрать стратегии автоматически") }
+
+            if (!running && enabled.isEmpty()) {
+                Text("Включи хотя бы один сервис", style = MaterialTheme.typography.bodySmall)
+            }
+            if (running) {
+                Text("Для подбора сначала остановите защиту", style = MaterialTheme.typography.bodySmall)
+            }
+            if (probe.running) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text(probe.progress, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { AutoProbe.cancel() }) { Text("Отмена") }
+            }
+            if (probe.report.isNotEmpty()) {
+                Text("Результат подбора", style = MaterialTheme.typography.titleSmall)
+                Text(probe.report, style = MaterialTheme.typography.bodySmall)
             }
 
             Button(
                 modifier = Modifier.fillMaxWidth(),
+                enabled = !probe.running,
                 onClick = {
                     if (running) {
                         startService(
-                            Intent(this@MainActivity, DpiVpnService::class.java)
-                                .setAction(DpiVpnService.ACTION_STOP)
+                            Intent(ctx, DpiVpnService::class.java).setAction(DpiVpnService.ACTION_STOP)
                         )
                     } else {
-                        val prepare = VpnService.prepare(this@MainActivity)
-                        if (prepare != null) vpnPermission.launch(prepare) else startService()
+                        val prepare = VpnService.prepare(ctx)
+                        if (prepare != null) vpnPermission.launch(prepare) else startVpn()
                     }
                 },
             ) { Text(if (running) "Остановить" else "Запустить") }
 
-            Text("Лог", style = MaterialTheme.typography.titleMedium)
+            Text("Лог", style = MaterialTheme.typography.titleSmall)
             Text(log.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
         }
     }

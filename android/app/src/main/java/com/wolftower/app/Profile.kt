@@ -1,6 +1,7 @@
 package com.wolftower.app
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 
 data class Profile(
@@ -8,28 +9,34 @@ data class Profile(
     val name: String,
     val packages: List<String>,
     val domains: List<String>,
-    val strategies: List<String>,
+    val probeHosts: List<String>,
     val blockQuic: Boolean,
 )
 
+data class ProfilesConfig(val profiles: List<Profile>, val strategies: List<String>) {
+    val defaultStrategy: String
+        get() = if ("disorder" in strategies) "disorder" else strategies.first()
+}
+
 object ProfilesRepository {
-    fun load(ctx: Context): List<Profile> {
+    private fun JSONArray?.strings(): List<String> =
+        if (this == null) emptyList() else (0 until length()).map { getString(it) }
+
+    fun load(ctx: Context): ProfilesConfig {
         val text = ctx.assets.open("profiles.json").bufferedReader().use { it.readText() }
-        val arr = JSONObject(text).getJSONArray("profiles")
-        return (0 until arr.length()).map { i ->
+        val root = JSONObject(text)
+        val arr = root.getJSONArray("profiles")
+        val profiles = (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
-            fun list(key: String): List<String> {
-                val a = o.optJSONArray(key) ?: return emptyList()
-                return (0 until a.length()).map { a.getString(it) }
-            }
             Profile(
                 id = o.getString("id"),
                 name = o.getString("name"),
-                packages = list("android_packages"),
-                domains = list("domains"),
-                strategies = list("strategies"),
+                packages = o.optJSONArray("android_packages").strings(),
+                domains = o.optJSONArray("domains").strings(),
+                probeHosts = o.optJSONArray("probe_hosts").strings(),
                 blockQuic = o.optBoolean("block_quic", false),
             )
         }
+        return ProfilesConfig(profiles, root.optJSONArray("strategies").strings())
     }
 }

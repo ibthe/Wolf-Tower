@@ -36,24 +36,28 @@ class DpiVpnService : VpnService() {
             return START_NOT_STICKY
         }
         startAll()
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun startAll() {
         if (running.value) return
-        val profiles = ProfilesRepository.load(this)
+        val config = ProfilesRepository.load(this)
         val enabled = Settings.enabledIds(this)
-        val chosen = profiles.filter { it.id in enabled }
+        val chosen = config.profiles.filter { it.id in enabled }
         if (chosen.isEmpty()) {
             appendLog("Не выбран ни один сервис")
             stopSelf()
             return
         }
 
-        val proc = ByeDpiProcess(this)
+        val selection = chosen.map { it to Settings.strategyFor(this, it.id, config.defaultStrategy) }
+        appendLog("Стратегии: " + selection.joinToString { "${it.first.name}=${it.second}" })
+
         // Если у всех выбранных сервисов block_quic, запрещаем UDP, чтобы QUIC откатился на TCP
         val noUdp = if (chosen.all { it.blockQuic }) listOf("-U") else emptyList()
-        val args = noUdp + StrategyArgs.forName(Settings.strategy(this))
+        val args = noUdp + StrategyArgs.buildGroups(selection)
+
+        val proc = ByeDpiProcess(this)
         if (!proc.start(SOCKS_PORT, args, ::appendLog)) {
             stopSelf()
             return
@@ -89,14 +93,15 @@ class DpiVpnService : VpnService() {
         appendLog("Запущено. Сервисы: ${chosen.joinToString { it.name }}")
     }
 
+    /** Безопасно вызывать несколько раз: каждый шаг защищён, чтобы остановка не роняла приложение. */
     private fun stopAll() {
-        tun2socks.stop()
-        byeDpi?.stop()
+        runCatching { tun2socks.stop() }
+        runCatching { byeDpi?.stop() }
         byeDpi = null
-        tun?.close()
+        runCatching { tun?.close() }
         tun = null
+        if (running.value) appendLog("Остановлено")
         running.value = false
-        appendLog("Остановлено")
     }
 
     override fun onDestroy() {

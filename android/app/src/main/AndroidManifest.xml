@@ -10,12 +10,15 @@
         <package android:name="com.google.android.gms" />
         <package android:name="com.whatsapp" />
         <package android:name="com.whatsapp.w4b" />
+        <package android:name="com.instagram.android" />
+        <package android:name="com.instagram.lite" />
         <package android:name="org.telegram.messenger" />
         <package android:name="org.telegram.messenger.web" />
         <package android:name="org.thunderdog.challegram" />
     </queries>
 
     <application
+        android:name=".WolfApp"
         android:label="Wolf Tower"
         android:extractNativeLibs="true"
         android:allowBackup="false"

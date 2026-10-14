@@ -12,7 +12,10 @@ object Settings {
     fun setEnabledIds(ctx: Context, ids: Set<String>) =
         prefs(ctx).edit().putStringSet("enabled", ids).apply()
 
-    fun strategy(ctx: Context): String = prefs(ctx).getString("strategy", "split") ?: "split"
+    /** Стратегия для конкретного сервиса. "none" = без обхода. */
+    fun strategyFor(ctx: Context, profileId: String, default: String): String =
+        prefs(ctx).getString("strategy_$profileId", default) ?: default
 
-    fun setStrategy(ctx: Context, s: String) = prefs(ctx).edit().putString("strategy", s).apply()
+    fun setStrategyFor(ctx: Context, profileId: String, strategy: String) =
+        prefs(ctx).edit().putString("strategy_$profileId", strategy).apply()
 }
