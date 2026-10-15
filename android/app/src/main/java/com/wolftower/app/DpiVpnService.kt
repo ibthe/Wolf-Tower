@@ -27,11 +27,6 @@ class DpiVpnService : VpnService() {
         const val ACTION_START = "com.wolftower.app.START"
         const val ACTION_STOP = "com.wolftower.app.STOP"
 
-        /** Порт, к которому подключается tun2socks (за ним стоит ByeDPI или DoH-прокси). */
-        const val SOCKS_PORT = 1080
-
-        /** Порт ByeDPI, когда перед ним работает DoH-прокси. */
-        private const val BYE_PORT_BEHIND_SHIM = 1082
         private const val CHANNEL = "protection"
         private const val NOTIF_ID = 1
         private const val HEAL_COOLDOWN_MS = 30L * 60 * 1000
@@ -41,6 +36,10 @@ class DpiVpnService : VpnService() {
 
         fun appendLog(s: String) {
             log.value = (log.value + s).takeLast(200)
+        }
+
+        fun clearLog() {
+            log.value = emptyList()
         }
     }
 
@@ -53,7 +52,13 @@ class DpiVpnService : VpnService() {
     private var shim: DohSocksShim? = null
     private var executor: ScheduledExecutorService? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
-    private var byePort = SOCKS_PORT
+
+    /** Порт, к которому подключается tun2socks (за ним стоит ByeDPI или DoH-прокси). Новый при каждом запуске. */
+    private var socksPort = 0
+    private var byePort = 0
+
+    /** Стратегии, временно подобранные самопроверкой в этом сеансе (в настройки не записываются). */
+    private val sessionOverrides = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     @Volatile
     private var currentFp = "none"
@@ -97,7 +102,9 @@ class DpiVpnService : VpnService() {
         goForeground()
 
         val doh = Settings.dohEnabled(this)
-        byePort = if (doh) BYE_PORT_BEHIND_SHIM else SOCKS_PORT
+        sessionOverrides.clear()
+        socksPort = Ports.free()
+        byePort = if (doh) Ports.free() else socksPort
 
         val proc = ByeDpiProcess(this)
         if (!proc.start(byePort, args, ::appendLog)) {
@@ -107,7 +114,7 @@ class DpiVpnService : VpnService() {
         synchronized(lock) { byeDpi = proc }
 
         if (doh) {
-            val s = DohSocksShim(SOCKS_PORT, byePort, ::appendLog)
+            val s = DohSocksShim(socksPort, byePort, ::appendLog)
             if (!s.start()) {
                 fail("DoH-прокси не запустился")
                 return
@@ -140,7 +147,10 @@ class DpiVpnService : VpnService() {
             return
         }
         tun = fd
-        tun2socks.start(fd, "127.0.0.1", SOCKS_PORT, ::appendLog)
+        if (!tun2socks.start(fd, "127.0.0.1", socksPort, ::appendLog)) {
+            fail("Туннель не запустился")
+            return
+        }
         setRunning(true)
         appendLog("Запущено. Сервисы: ${chosen.joinToString { it.name }}")
 
@@ -157,7 +167,9 @@ class DpiVpnService : VpnService() {
         val config = ProfilesRepository.load(this)
         val chosen = config.profiles.filter { it.id in Settings.enabledIds(this) }
         if (chosen.isEmpty()) return null
-        val selection = chosen.map { it to Settings.strategyFor(this, it.id, config.defaultStrategy) }
+        val selection = chosen.map {
+            it to (sessionOverrides[it.id] ?: Settings.strategyFor(this, it.id, config.defaultStrategy))
+        }
         appendLog("Стратегии: " + selection.joinToString { "${it.first.name}=${it.second}" })
 
         // Запрет UDP (QUIC): по выбору пользователя, а если не задано, то когда его хотят все сервисы
@@ -234,7 +246,7 @@ class DpiVpnService : VpnService() {
         }
     }
 
-    private fun probeHealthy(p: Profile): Boolean = p.probeHosts.any { Prober.probe(it, SOCKS_PORT) }
+    private fun probeHealthy(p: Profile): Boolean = p.probeHosts.any { Prober.probe(it, socksPort) }
 
     /**
      * Самопроверка раз в 10 минут: открываются ли тестовые адреса через работающий туннель. Если сервис не
@@ -256,7 +268,7 @@ class DpiVpnService : VpnService() {
     }
 
     private fun healProfile(config: ProfilesConfig, p: Profile) {
-        val current = Settings.strategyFor(this, p.id, config.defaultStrategy)
+        val current = sessionOverrides[p.id] ?: Settings.strategyFor(this, p.id, config.defaultStrategy)
         val candidates = (listOf("none") + config.strategies).filter { it != current }
         appendLog("Проблема с ${p.name}, подбираю другую стратегию…")
         val counts = AutoProbe.score(this, listOf(p), candidates, { Thread.currentThread().isInterrupted }) { }
@@ -274,8 +286,9 @@ class DpiVpnService : VpnService() {
             appendLog("${p.name}: ничего не помогло (возможна блокировка по IP)")
             return
         }
-        Settings.setStrategyFor(this, p.id, best)
-        appendLog("${p.name}: переключено на $best ($bestOk/${p.probeHosts.size})")
+        // Только на время этого сеанса: кратковременный сбой сети не должен навсегда испортить настройки
+        sessionOverrides[p.id] = best
+        appendLog("${p.name}: временно переключено на $best ($bestOk/${p.probeHosts.size}), в настройках без изменений")
         restartByeDpi()
     }
 

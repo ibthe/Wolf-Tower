@@ -4,11 +4,13 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import hev.htproxy.TProxyService
 import java.io.File
+import kotlin.random.Random
 
 /**
  * tun2socks на базе hev-socks5-tunnel (MIT).
  * DNS: приложения спрашивают адрес у hev (mapdns), тот отдаёт фейковый IP и передаёт в SOCKS5
- * имя домена. ByeDPI сам резолвит домен и видит имя для десинхронизации.
+ * имя домена. Диапазон фейковых адресов выбирается заново при каждом запуске: иначе после перезапуска
+ * адрес, который приложение запомнило в прошлом сеансе, мог бы означать уже другой сайт.
  */
 class HevTun2Socks(private val ctx: Context) : Tun2Socks {
 
@@ -23,7 +25,8 @@ class HevTun2Socks(private val ctx: Context) : Tun2Socks {
         socksHost: String,
         socksPort: Int,
         onLog: (String) -> Unit,
-    ) {
+    ): Boolean {
+        val second = 64 + Random.nextInt(64) // 100.64.x.x .. 100.127.x.x
         val cfg = File(ctx.filesDir, "hev.yml")
         cfg.writeText(
             """
@@ -37,8 +40,8 @@ class HevTun2Socks(private val ctx: Context) : Tun2Socks {
             mapdns:
               address: $MAPDNS_ADDRESS
               port: 53
-              network: 100.64.0.0
-              netmask: 255.192.0.0
+              network: 100.$second.0.0
+              netmask: 255.255.0.0
               cache-size: 10000
             misc:
               task-stack-size: 81920
@@ -46,17 +49,24 @@ class HevTun2Socks(private val ctx: Context) : Tun2Socks {
               log-level: warn
             """.trimIndent() + "\n"
         )
-        try {
-            val ok = TProxyService.TProxyStartService(cfg.absolutePath, tun.fd)
-            onLog(if (ok) "tun2socks запущен" else "tun2socks: не удалось запуститься")
+        return try {
+            var ok = TProxyService.TProxyStartService(cfg.absolutePath, tun.fd)
+            if (!ok) {
+                // Остаток прошлого сеанса в этом же процессе: останавливаем и пробуем ещё раз
+                runCatching { TProxyService.TProxyStopService() }
+                ok = TProxyService.TProxyStartService(cfg.absolutePath, tun.fd)
+            }
+            onLog(if (ok) "tun2socks запущен (адреса 100.$second.x.x)" else "tun2socks: не удалось запуститься")
+            ok
         } catch (t: Throwable) {
             onLog("tun2socks: ошибка загрузки библиотеки: ${t.message}")
+            false
         }
     }
 
     override fun stop() {
         try {
-            if (TProxyService.TProxyIsRunning()) TProxyService.TProxyStopService()
+            TProxyService.TProxyStopService()
         } catch (_: Throwable) {
         }
     }

@@ -14,12 +14,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -45,6 +47,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlin.concurrent.thread
@@ -85,13 +90,17 @@ class MainActivity : ComponentActivity() {
         var licenseMsg by remember { mutableStateOf<String?>(null) }
         var showKeyField by remember { mutableStateOf(status !is LicenseStatus.Licensed) }
         var showLicenses by remember { mutableStateOf(false) }
+        var advancedOpen by remember { mutableStateOf(false) }
+        var logOpen by remember { mutableStateOf(false) }
         var busy by remember { mutableStateOf(false) }
+        val logScroll = rememberScrollState()
         val clipboard = LocalClipboardManager.current
         val running by DpiVpnService.running.collectAsState()
         val log by DpiVpnService.log.collectAsState()
         val probe by AutoProbe.state.collectAsState()
         val tick = resumeTick.value
         val canRun = status.canRun
+        val deviceId = remember { LicenseManager.deviceId(ctx) }
 
         val notifPermission = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
@@ -128,6 +137,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        // Лог прокручивается к последней строке
+        LaunchedEffect(log.size, logOpen) {
+            if (logOpen) logScroll.scrollTo(logScroll.maxValue)
+        }
 
         fun startVpn() {
             startService(Intent(ctx, DpiVpnService::class.java).setAction(DpiVpnService.ACTION_START))
@@ -141,7 +154,39 @@ class MainActivity : ComponentActivity() {
             Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // ---------- Статус и главная кнопка ----------
             Text("Wolf Tower", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                (if (running) "Защита включена" else "Защита выключена") + ". Сеть: $netName",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !probe.running && !busy && (running || canRun),
+                onClick = {
+                    if (running) {
+                        startService(
+                            Intent(ctx, DpiVpnService::class.java).setAction(DpiVpnService.ACTION_STOP)
+                        )
+                    } else {
+                        busy = true
+                        thread(isDaemon = true) {
+                            LicenseManager.networkCheck(ctx)
+                            runOnUiThread {
+                                status = LicenseManager.status(ctx)
+                                busy = false
+                                if (status.canRun) {
+                                    val prepare = VpnService.prepare(ctx)
+                                    if (prepare != null) vpnPermission.launch(prepare) else startVpn()
+                                }
+                            }
+                        }
+                    }
+                },
+            ) { Text(if (running) "Остановить" else "Запустить") }
+            if (!running && enabled.isEmpty()) {
+                Text("Включите хотя бы один сервис ниже", style = MaterialTheme.typography.bodySmall)
+            }
 
             // ---------- Лицензия ----------
             Card(Modifier.fillMaxWidth()) {
@@ -152,11 +197,25 @@ class MainActivity : ComponentActivity() {
                         TextButton(onClick = { showKeyField = true }) { Text("Ввести новый ключ") }
                     }
                     if (showKeyField) {
+                        Text("ID устройства (нужен для ключа с привязкой):", style = MaterialTheme.typography.bodySmall)
                         SelectionContainer {
                             Text(
-                                "ID устройства: ${LicenseManager.deviceId(ctx)} (сообщите при покупке ключа, привязанного к устройству)",
-                                style = MaterialTheme.typography.bodySmall,
+                                deviceId,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontFamily = FontFamily.Monospace,
                             )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
+                                clipboard.setText(AnnotatedString(deviceId))
+                                licenseMsg = "ID скопирован"
+                            }) { Text("Копировать ID") }
+                            OutlinedButton(onClick = {
+                                val send = Intent(Intent.ACTION_SEND)
+                                    .setType("text/plain")
+                                    .putExtra(Intent.EXTRA_TEXT, "ID устройства Wolf Tower: $deviceId")
+                                startActivity(Intent.createChooser(send, "Отправить ID"))
+                            }) { Text("Поделиться") }
                         }
                         OutlinedTextField(
                             value = keyInput,
@@ -203,40 +262,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // ---------- Работа в фоне ----------
-            if (!batteryOk) {
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Работа в фоне", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Чтобы система не отключала защиту, разрешите приложению работать без ограничений батареи. " +
-                                "На Xiaomi, Huawei, Samsung и других дополнительно включите автозапуск и снимите " +
-                                "ограничения фона в настройках приложения.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = {
-                                try {
-                                    startActivity(
-                                        Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                                            .setData(Uri.parse("package:${ctx.packageName}"))
-                                    )
-                                } catch (_: Exception) {
-                                }
-                            }) { Text("Разрешить") }
-                            OutlinedButton(onClick = {
-                                startActivity(
-                                    Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                                        .setData(Uri.parse("package:${ctx.packageName}"))
-                                )
-                            }) { Text("Настройки приложения") }
-                        }
-                    }
-                }
-            }
-
-            Text("Сеть: $netName (стратегии запоминаются для каждой сети)", style = MaterialTheme.typography.bodySmall)
-
+            // ---------- Сервисы ----------
             config.profiles.forEach { p ->
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -280,60 +306,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // ---------- QUIC ----------
-            val autoQuic = config.profiles.filter { it.id in enabled }.let { sel ->
-                sel.isNotEmpty() && sel.all { it.blockQuic }
-            }
-            Card(Modifier.fillMaxWidth()) {
-                Row(
-                    Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Блокировать QUIC (UDP)", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Помогает YouTube и Instagram откатиться на TCP. Ломает звонки WhatsApp.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    Switch(
-                        checked = dohOn || (blockQuicPref ?: autoQuic),
-                        enabled = !running && !dohOn,
-                        onCheckedChange = {
-                            Settings.setBlockQuic(ctx, it)
-                            blockQuicPref = it
-                        },
-                    )
-                }
-            }
-
-            // ---------- DoH ----------
-            Card(Modifier.fillMaxWidth()) {
-                Row(
-                    Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Защищённый DNS (DoH), экспериментально", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Определяет адреса сайтов через DoH, если DNS оператора подменяет ответы. " +
-                                "Отключает UDP и QUIC (звонки WhatsApp работать не будут).",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    Switch(
-                        checked = dohOn,
-                        enabled = !running,
-                        onCheckedChange = {
-                            Settings.setDoh(ctx, it)
-                            dohOn = it
-                        },
-                    )
-                }
-            }
-
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !running && !probe.running && enabled.isNotEmpty() && canRun,
@@ -345,13 +317,9 @@ class MainActivity : ComponentActivity() {
                     )
                 },
             ) { Text("Подобрать стратегии автоматически") }
-
-            if (!running && enabled.isEmpty()) {
-                Text("Включи хотя бы один сервис", style = MaterialTheme.typography.bodySmall)
-            }
             if (running) {
                 Text(
-                    "Защита работает: приложение само проверяет доступность и меняет стратегию, если сервис перестаёт открываться. Для ручного подбора сначала остановите защиту.",
+                    "Защита работает: приложение само проверяет доступность и временно меняет стратегию, если сервис перестаёт открываться. Для ручного подбора сначала остановите защиту.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -365,59 +333,158 @@ class MainActivity : ComponentActivity() {
                 Text(probe.report, style = MaterialTheme.typography.bodySmall)
             }
 
-            Button(
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !probe.running && !busy && (running || canRun),
-                onClick = {
-                    if (running) {
-                        startService(
-                            Intent(ctx, DpiVpnService::class.java).setAction(DpiVpnService.ACTION_STOP)
+            // ---------- Работа в фоне ----------
+            if (!batteryOk) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Работа в фоне", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Чтобы система не отключала защиту, разрешите приложению работать без ограничений батареи. " +
+                                "На Xiaomi, Huawei, Samsung и других дополнительно включите автозапуск и снимите " +
+                                "ограничения фона в настройках приложения.",
+                            style = MaterialTheme.typography.bodySmall,
                         )
-                    } else {
-                        busy = true
-                        thread(isDaemon = true) {
-                            LicenseManager.networkCheck(ctx)
-                            runOnUiThread {
-                                status = LicenseManager.status(ctx)
-                                busy = false
-                                if (status.canRun) {
-                                    val prepare = VpnService.prepare(ctx)
-                                    if (prepare != null) vpnPermission.launch(prepare) else startVpn()
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
+                                try {
+                                    startActivity(
+                                        Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                            .setData(Uri.parse("package:${ctx.packageName}"))
+                                    )
+                                } catch (_: Exception) {
                                 }
-                            }
+                            }) { Text("Разрешить") }
+                            OutlinedButton(onClick = {
+                                startActivity(
+                                    Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                        .setData(Uri.parse("package:${ctx.packageName}"))
+                                )
+                            }) { Text("Настройки приложения") }
                         }
                     }
-                },
-            ) { Text(if (running) "Остановить" else "Запустить") }
+                }
+            }
 
-            Text("Лог", style = MaterialTheme.typography.titleSmall)
-            Text(log.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
-
-            OutlinedButton(
-                modifier = Modifier.fillMaxWidth(),
-                onClick = {
-                    val send = Intent(Intent.ACTION_SEND)
-                        .setType("text/plain")
-                        .putExtra(Intent.EXTRA_SUBJECT, "Wolf Tower: диагностика")
-                        .putExtra(Intent.EXTRA_TEXT, DiagReport.build(ctx, config))
-                    startActivity(Intent.createChooser(send, "Отправить диагностику"))
-                },
-            ) { Text("Отправить диагностику") }
-            Text(
-                "В отчёт попадают версия Android, модель, тип сети и оператор, выбранные стратегии и лог. IP-адреса, трафик и сам ключ не включаются.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-
-            TextButton(onClick = { showLicenses = !showLicenses }) { Text("Лицензии компонентов") }
-            if (showLicenses) {
-                val text = remember {
-                    try {
-                        ctx.assets.open("third_party_licenses.txt").bufferedReader().use { it.readText() }
-                    } catch (_: Exception) {
-                        "Не удалось прочитать файл лицензий"
+            // ---------- Лог: сворачиваемое окно фиксированной высоты ----------
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Лог (${log.size})", style = MaterialTheme.typography.titleSmall)
+                        TextButton(onClick = { logOpen = !logOpen }) {
+                            Text(if (logOpen) "Свернуть" else "Развернуть")
+                        }
+                    }
+                    if (!logOpen) {
+                        Text(
+                            log.lastOrNull() ?: "Пока пусто",
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    } else {
+                        Box(Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(logScroll)) {
+                            SelectionContainer {
+                                Text(
+                                    log.takeLast(100).joinToString("\n"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = {
+                                clipboard.setText(AnnotatedString(log.joinToString("\n")))
+                            }) { Text("Копировать") }
+                            OutlinedButton(onClick = { DpiVpnService.clearLog() }) { Text("Очистить") }
+                        }
                     }
                 }
-                SelectionContainer { Text(text, style = MaterialTheme.typography.bodySmall) }
+            }
+
+            // ---------- Дополнительно ----------
+            TextButton(onClick = { advancedOpen = !advancedOpen }) {
+                Text(if (advancedOpen) "Дополнительно: скрыть" else "Дополнительно: QUIC, DoH, диагностика")
+            }
+            if (advancedOpen) {
+                val autoQuic = config.profiles.filter { it.id in enabled }.let { sel ->
+                    sel.isNotEmpty() && sel.all { it.blockQuic }
+                }
+                Card(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Блокировать QUIC (UDP)", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "Помогает YouTube и Instagram откатиться на TCP. Ломает звонки WhatsApp.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Switch(
+                            checked = dohOn || (blockQuicPref ?: autoQuic),
+                            enabled = !running && !dohOn,
+                            onCheckedChange = {
+                                Settings.setBlockQuic(ctx, it)
+                                blockQuicPref = it
+                            },
+                        )
+                    }
+                }
+                Card(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Защищённый DNS (DoH), экспериментально", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "Определяет адреса сайтов через DoH, если DNS оператора подменяет ответы. " +
+                                    "Отключает UDP и QUIC (звонки WhatsApp работать не будут).",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Switch(
+                            checked = dohOn,
+                            enabled = !running,
+                            onCheckedChange = {
+                                Settings.setDoh(ctx, it)
+                                dohOn = it
+                            },
+                        )
+                    }
+                }
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        val send = Intent(Intent.ACTION_SEND)
+                            .setType("text/plain")
+                            .putExtra(Intent.EXTRA_SUBJECT, "Wolf Tower: диагностика")
+                            .putExtra(Intent.EXTRA_TEXT, DiagReport.build(ctx, config))
+                        startActivity(Intent.createChooser(send, "Отправить диагностику"))
+                    },
+                ) { Text("Отправить диагностику") }
+                Text(
+                    "В отчёт попадают версия Android, модель, тип сети и оператор, выбранные стратегии и лог. IP-адреса, трафик и сам ключ не включаются.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { showLicenses = !showLicenses }) { Text("Лицензии компонентов") }
+                if (showLicenses) {
+                    val text = remember {
+                        try {
+                            ctx.assets.open("third_party_licenses.txt").bufferedReader().use { it.readText() }
+                        } catch (_: Exception) {
+                            "Не удалось прочитать файл лицензий"
+                        }
+                    }
+                    SelectionContainer { Text(text, style = MaterialTheme.typography.bodySmall) }
+                }
             }
         }
     }

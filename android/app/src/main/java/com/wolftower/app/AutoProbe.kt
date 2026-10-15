@@ -29,7 +29,6 @@ object AutoProbe {
 
     @Volatile
     private var cancelled = false
-    private const val BASE_PORT = 1100
     private const val BATCH = 4
 
     fun cancel() {
@@ -69,8 +68,8 @@ object AutoProbe {
             val procs = ArrayList<Pair<String, ByeDpiProcess>>()
             val ports = HashMap<String, Int>()
             try {
-                batch.forEachIndexed { i, strategy ->
-                    val port = BASE_PORT + i
+                batch.forEach { strategy ->
+                    val port = Ports.free()
                     val proc = ByeDpiProcess(ctx)
                     if (proc.start(port, StrategyArgs.forName(strategy)) { }) {
                         procs.add(strategy to proc)
