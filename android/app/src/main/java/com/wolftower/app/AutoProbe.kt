@@ -49,55 +49,79 @@ object AutoProbe {
         }
     }
 
-    private fun run(ctx: Context, profiles: List<Profile>, strategies: List<String>) {
-        val candidates = listOf("none") + strategies
+    /**
+     * Считает, сколько тестовых адресов каждого сервиса открылось при каждой стратегии.
+     * Возвращает: id сервиса -> стратегия -> число успехов. Используется и интерфейсом, и самопроверкой.
+     */
+    fun score(
+        ctx: Context,
+        profiles: List<Profile>,
+        candidates: List<String>,
+        isCancelled: () -> Boolean,
+        onProgress: (Int) -> Unit,
+    ): Map<String, Map<String, Int>> {
         val okCounts = HashMap<String, HashMap<String, Int>>()
         profiles.forEach { okCounts[it.id] = HashMap() }
         var checked = 0
 
         for (batch in candidates.chunked(BATCH)) {
-            if (cancelled) break
+            if (isCancelled()) break
             val procs = ArrayList<Pair<String, ByeDpiProcess>>()
             val ports = HashMap<String, Int>()
-            batch.forEachIndexed { i, strategy ->
-                val port = BASE_PORT + i
-                val proc = ByeDpiProcess(ctx)
-                if (proc.start(port, StrategyArgs.forName(strategy)) { }) {
-                    procs.add(strategy to proc)
-                    ports[strategy] = port
-                }
-            }
-            if (procs.isEmpty()) throw IllegalStateException("не удалось запустить ByeDPI")
-            ports.values.forEach { waitPort(it) }
-
-            val pool = Executors.newFixedThreadPool(12)
             try {
-                val jobs = ArrayList<Triple<String, String, Future<Boolean>>>()
-                for ((strategy, _) in procs) {
-                    for (profile in profiles) {
-                        for (host in profile.probeHosts) {
-                            val port = ports.getValue(strategy)
-                            jobs.add(Triple(strategy, profile.id, pool.submit(Callable { Prober.probe(host, port) })))
+                batch.forEachIndexed { i, strategy ->
+                    val port = BASE_PORT + i
+                    val proc = ByeDpiProcess(ctx)
+                    if (proc.start(port, StrategyArgs.forName(strategy)) { }) {
+                        procs.add(strategy to proc)
+                        ports[strategy] = port
+                    }
+                }
+                if (procs.isEmpty()) throw IllegalStateException("не удалось запустить ByeDPI")
+                ports.values.forEach { waitPort(it) }
+
+                val pool = Executors.newFixedThreadPool(12)
+                try {
+                    val jobs = ArrayList<Triple<String, String, Future<Boolean>>>()
+                    for ((strategy, _) in procs) {
+                        for (profile in profiles) {
+                            for (host in profile.probeHosts) {
+                                val port = ports.getValue(strategy)
+                                jobs.add(
+                                    Triple(strategy, profile.id, pool.submit(Callable { Prober.probe(host, port) }))
+                                )
+                            }
                         }
                     }
-                }
-                for ((strategy, profileId, future) in jobs) {
-                    val success = try {
-                        future.get()
-                    } catch (_: Exception) {
-                        false
+                    for ((strategy, profileId, future) in jobs) {
+                        val success = try {
+                            future.get()
+                        } catch (e: InterruptedException) {
+                            throw e
+                        } catch (_: Exception) {
+                            false
+                        }
+                        if (success) {
+                            val m = okCounts.getValue(profileId)
+                            m[strategy] = (m[strategy] ?: 0) + 1
+                        }
                     }
-                    if (success) {
-                        val m = okCounts.getValue(profileId)
-                        m[strategy] = (m[strategy] ?: 0) + 1
-                    }
+                } finally {
+                    pool.shutdownNow()
                 }
             } finally {
-                pool.shutdownNow()
                 procs.forEach { it.second.stop() }
             }
             checked += batch.size
-            state.value = state.value.copy(progress = "Проверено вариантов: $checked из ${candidates.size}")
+            onProgress(checked)
+        }
+        return okCounts
+    }
+
+    private fun run(ctx: Context, profiles: List<Profile>, strategies: List<String>) {
+        val candidates = listOf("none") + strategies
+        val okCounts = score(ctx, profiles, candidates, { cancelled }) { n ->
+            state.value = state.value.copy(progress = "Проверено вариантов: $n из ${candidates.size}")
         }
 
         if (cancelled) {

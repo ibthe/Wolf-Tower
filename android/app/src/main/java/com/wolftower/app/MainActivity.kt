@@ -1,9 +1,14 @@
 package com.wolftower.app
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -41,9 +46,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
+    /** Увеличивается при возврате в приложение: обновляем статусы (батарея, лицензия). */
+    private val resumeTick = mutableStateOf(0)
+
+    override fun onResume() {
+        super.onResume()
+        resumeTick.value = resumeTick.value + 1
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val config = ProfilesRepository.load(this)
@@ -54,6 +68,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun Screen(config: ProfilesConfig) {
         val ctx = this
+        val powerManager = remember { ctx.getSystemService(PowerManager::class.java) }
         var enabled by remember { mutableStateOf(Settings.enabledIds(ctx)) }
         var strategies by remember {
             mutableStateOf(
@@ -61,6 +76,9 @@ class MainActivity : ComponentActivity() {
             )
         }
         var blockQuicPref by remember { mutableStateOf(Settings.blockQuicPref(ctx)) }
+        var dohOn by remember { mutableStateOf(Settings.dohEnabled(ctx)) }
+        var batteryOk by remember { mutableStateOf(powerManager.isIgnoringBatteryOptimizations(ctx.packageName)) }
+        var netName by remember { mutableStateOf(NetId.describe(ctx)) }
         var crash by remember { mutableStateOf(CrashInfo.read(ctx)) }
         var status by remember { mutableStateOf(LicenseManager.status(ctx)) }
         var keyInput by remember { mutableStateOf("") }
@@ -72,17 +90,36 @@ class MainActivity : ComponentActivity() {
         val running by DpiVpnService.running.collectAsState()
         val log by DpiVpnService.log.collectAsState()
         val probe by AutoProbe.state.collectAsState()
+        val tick = resumeTick.value
         val canRun = status.canRun
 
-        // Сверка часов с сетью при открытии приложения и обновление статуса после остановки защиты
+        val notifPermission = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { }
+
+        // При открытии: просим разрешение на уведомления (один раз) и сверяем часы с сетью
         LaunchedEffect(Unit) {
+            if (Build.VERSION.SDK_INT >= 33 && !Settings.notifAsked(ctx) &&
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                Settings.setNotifAsked(ctx)
+                notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
             thread(isDaemon = true) {
                 LicenseManager.networkCheck(ctx)
                 runOnUiThread { status = LicenseManager.status(ctx) }
             }
         }
-        LaunchedEffect(running) { status = LicenseManager.status(ctx) }
-
+        // Возврат в приложение и смена состояния защиты: обновляем статусы
+        LaunchedEffect(tick, running) {
+            status = LicenseManager.status(ctx)
+            batteryOk = powerManager.isIgnoringBatteryOptimizations(ctx.packageName)
+            netName = NetId.describe(ctx)
+            strategies = config.profiles.associate {
+                it.id to Settings.strategyFor(ctx, it.id, config.defaultStrategy)
+            }
+        }
         // После автоподбора подтягиваем выбранные стратегии в интерфейс
         LaunchedEffect(probe.done) {
             if (probe.done) {
@@ -166,6 +203,40 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // ---------- Работа в фоне ----------
+            if (!batteryOk) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Работа в фоне", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Чтобы система не отключала защиту, разрешите приложению работать без ограничений батареи. " +
+                                "На Xiaomi, Huawei, Samsung и других дополнительно включите автозапуск и снимите " +
+                                "ограничения фона в настройках приложения.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
+                                try {
+                                    startActivity(
+                                        Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                            .setData(Uri.parse("package:${ctx.packageName}"))
+                                    )
+                                } catch (_: Exception) {
+                                }
+                            }) { Text("Разрешить") }
+                            OutlinedButton(onClick = {
+                                startActivity(
+                                    Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                        .setData(Uri.parse("package:${ctx.packageName}"))
+                                )
+                            }) { Text("Настройки приложения") }
+                        }
+                    }
+                }
+            }
+
+            Text("Сеть: $netName (стратегии запоминаются для каждой сети)", style = MaterialTheme.typography.bodySmall)
+
             config.profiles.forEach { p ->
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -227,11 +298,37 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     Switch(
-                        checked = blockQuicPref ?: autoQuic,
-                        enabled = !running,
+                        checked = dohOn || (blockQuicPref ?: autoQuic),
+                        enabled = !running && !dohOn,
                         onCheckedChange = {
                             Settings.setBlockQuic(ctx, it)
                             blockQuicPref = it
+                        },
+                    )
+                }
+            }
+
+            // ---------- DoH ----------
+            Card(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Защищённый DNS (DoH), экспериментально", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Определяет адреса сайтов через DoH, если DNS оператора подменяет ответы. " +
+                                "Отключает UDP и QUIC (звонки WhatsApp работать не будут).",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(
+                        checked = dohOn,
+                        enabled = !running,
+                        onCheckedChange = {
+                            Settings.setDoh(ctx, it)
+                            dohOn = it
                         },
                     )
                 }
@@ -253,7 +350,10 @@ class MainActivity : ComponentActivity() {
                 Text("Включи хотя бы один сервис", style = MaterialTheme.typography.bodySmall)
             }
             if (running) {
-                Text("Для подбора сначала остановите защиту", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "Защита работает: приложение само проверяет доступность и меняет стратегию, если сервис перестаёт открываться. Для ручного подбора сначала остановите защиту.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
             if (probe.running) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -292,6 +392,21 @@ class MainActivity : ComponentActivity() {
 
             Text("Лог", style = MaterialTheme.typography.titleSmall)
             Text(log.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
+
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    val send = Intent(Intent.ACTION_SEND)
+                        .setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, "Wolf Tower: диагностика")
+                        .putExtra(Intent.EXTRA_TEXT, DiagReport.build(ctx, config))
+                    startActivity(Intent.createChooser(send, "Отправить диагностику"))
+                },
+            ) { Text("Отправить диагностику") }
+            Text(
+                "В отчёт попадают версия Android, модель, тип сети и оператор, выбранные стратегии и лог. IP-адреса, трафик и сам ключ не включаются.",
+                style = MaterialTheme.typography.bodySmall,
+            )
 
             TextButton(onClick = { showLicenses = !showLicenses }) { Text("Лицензии компонентов") }
             if (showLicenses) {

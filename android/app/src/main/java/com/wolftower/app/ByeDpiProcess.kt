@@ -38,6 +38,7 @@ class ByeDpiProcess(private val ctx: Context) {
     fun stop() {
         try {
             proc?.destroy()
+            proc?.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)
         } catch (_: Exception) {
         }
         proc = null
