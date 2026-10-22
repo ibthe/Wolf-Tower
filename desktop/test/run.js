@@ -9,7 +9,7 @@ const path = require('path');
 const vm = require('vm');
 const { execFileSync } = require('child_process');
 
-const { buildGroups, loadConfig, forName } = require('../src/profiles');
+const { buildGroups, loadConfig, forName, parseRaw } = require('../src/profiles');
 const { buildPac, PacServer } = require('../src/pac');
 const { Store } = require('../src/store');
 const { License } = require('../src/license');
@@ -35,15 +35,21 @@ const root = path.join(__dirname, '..', '..');
 const config = loadConfig([path.join(root, 'profiles', 'profiles.json')]);
 
 (async () => {
-  await test('профили и стратегии загружаются, по умолчанию disorder', () => {
-    assert(config.profiles.length >= 4);
-    assert.strictEqual(config.defaultStrategy, 'disorder');
+  await test('профили и стратегии загружаются, по умолчанию chain+udp', () => {
+    assert.deepStrictEqual(config.profiles.map((p) => p.id), ['whatsapp']);
+    assert.strictEqual(config.defaultStrategy, 'chain+udp');
     assert.deepStrictEqual(forName('fake+oob'), ['-f-1', '-t', '8', '-o1+s']);
     assert.deepStrictEqual(forName('none'), []);
   });
 
   await test('группы ByeDPI: как в Android (hosts, ipset, --auto=none)', () => {
-    const by = (id) => config.profiles.find((p) => p.id === id);
+    // продукт теперь только про WhatsApp, поэтому схему групп проверяем на искусственных профилях
+    const mk = (id, domains, ipRanges = []) => ({ id, name: id, domains, ipRanges, probeHosts: [], blockQuic: false, matchAll: false });
+    const by = (id) => ({
+      whatsapp: mk('whatsapp', ['whatsapp.com', 'whatsapp.net']),
+      youtube: mk('youtube', ['youtube.com', 'googlevideo.com']),
+      telegram: mk('telegram', [], ['91.108.4.0/22']),
+    })[id];
     const out = buildGroups([
       { profile: by('whatsapp'), strategy: 'disorder' },
       { profile: by('youtube'), strategy: 'none' },
@@ -55,6 +61,38 @@ const config = loadConfig([path.join(root, 'profiles', 'profiles.json')]);
     assert.strictEqual(out[3], '--auto=none');
     assert.strictEqual(out.filter((x) => x === '--ipset').length, 1);
     assert(!out.join(' ').includes('youtube.com'), 'none не должен попасть в аргументы');
+  });
+
+  await test('WhatsApp один: без фильтра по SNI (чат Noise без SNI тоже получает обход)', () => {
+    const wa = config.profiles.find((p) => p.id === 'whatsapp');
+    assert.strictEqual(wa.matchAll, true);
+    const out = buildGroups([{ profile: wa, strategy: 'chain+udp' }]);
+    assert(!out.includes('--hosts') && !out.includes('--auto=none'));
+    assert.deepStrictEqual(out.slice(0, 2), ['-d1', '-s1+s']);
+    assert.strictEqual(out[out.length - 1], '-a1');
+    // вместе с другим сервисом возвращается разбиение по группам
+    const yt = { id: 'youtube', name: 'youtube', domains: ['youtube.com'], ipRanges: [], probeHosts: [], blockQuic: false, matchAll: false };
+    const two = buildGroups([{ profile: wa, strategy: 'disorder' }, { profile: yt, strategy: 'split' }]);
+    assert.strictEqual(two[0], '--hosts');
+  });
+
+  await test('строка в стиле ByeByeDPI: разрешены флаги обхода, опасные отклоняются', () => {
+    const s = '-d1 -s1+s -s3+s -s6+s -s9+s -s12+s -s15+s -s20+s -s30+s -a1';
+    assert.deepStrictEqual(forName('raw:' + s), s.split(' '));
+    assert.deepStrictEqual(forName('chain+udp'), s.split(' '));
+    assert.deepStrictEqual(parseRaw('-f -1 -t 8 -d1+s'), ['-f', '-1', '-t', '8', '-d1+s']);
+    for (const bad of ['-i 0.0.0.0', '-p 80', '--hosts :a.com', '-H :a.com', '-A t', '-U', '-D', '-x 2', '', '-d1 -c 9']) {
+      assert.strictEqual(parseRaw(bad), null, bad);
+    }
+    assert.deepStrictEqual(forName('raw:-D'), []);
+  });
+
+  await test('все стратегии из profiles.json известны и не содержат управляющих флагов', () => {
+    for (const name of config.strategies) {
+      const args = forName(name);
+      assert(args.length > 0, name);
+      assert.notStrictEqual(parseRaw(args.join(' ')), null, name);
+    }
   });
 
   await test('PAC: только домены выбранных сервисов идут через прокси', () => {
@@ -237,9 +275,8 @@ const config = loadConfig([path.join(root, 'profiles', 'profiles.json')]);
     fs.copyFileSync(bin, path.join(resDir, 'bin', process.platform, process.platform === 'win32' ? 'ciadpi.exe' : 'ciadpi'));
     fs.chmodSync(path.join(resDir, 'bin', process.platform, 'ciadpi'), 0o755);
     const store = new Store(path.join(tmp, 'eng'));
-    store.set('enabled', ['whatsapp', 'telegram']);
-    store.set('strategy_whatsapp', 'disorder');
-    store.set('strategy_telegram', 'oob');
+    store.set('enabled', ['whatsapp']);
+    store.set('strategy_whatsapp', 'chain+udp');
     store.set('socksPort', await freePort());
     const engine = new Engine({ resourcesDir: resDir, store, config });
     const logs = [];

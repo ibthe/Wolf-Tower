@@ -12,11 +12,14 @@ data class Profile(
     val ipRanges: List<String>,
     val probeHosts: List<String>,
     val blockQuic: Boolean,
+    /** true = при единственном активном сервисе стратегия применяется ко всему трафику приложения (без фильтра по SNI). */
+    val matchAll: Boolean = false,
 )
 
 data class ProfilesConfig(val profiles: List<Profile>, val strategies: List<String>) {
+    /** Первая в списке: chain+udp работает и без SNI (чат WhatsApp), и с TLS, и даёт UDP-обход для звонков. */
     val defaultStrategy: String
-        get() = if ("disorder" in strategies) "disorder" else strategies.first()
+        get() = strategies.first()
 }
 
 object ProfilesRepository {
@@ -27,7 +30,7 @@ object ProfilesRepository {
         val text = ctx.assets.open("profiles.json").bufferedReader().use { it.readText() }
         val root = JSONObject(text)
         val arr = root.getJSONArray("profiles")
-        val profiles = (0 until arr.length()).map { i ->
+        val profiles = (0 until arr.length()).filter { arr.getJSONObject(it).getString("id") == Settings.SERVICE_ID }.map { i ->
             val o = arr.getJSONObject(i)
             Profile(
                 id = o.getString("id"),
@@ -37,6 +40,7 @@ object ProfilesRepository {
                 ipRanges = o.optJSONArray("ip_ranges").strings(),
                 probeHosts = o.optJSONArray("probe_hosts").strings(),
                 blockQuic = o.optBoolean("block_quic", false),
+                matchAll = o.optBoolean("match_all", false),
             )
         }
         return ProfilesConfig(profiles, root.optJSONArray("strategies").strings())
