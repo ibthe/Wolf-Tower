@@ -15,12 +15,17 @@ async function runWithLimit(tasks, limit) {
  * Для каждого варианта стратегии поднимается отдельный ByeDPI (по 4 одновременно) и через него
  * проверяются тестовые адреса выбранных сервисов. Возвращает { idСервиса: { стратегия: числоУспехов } }.
  */
-async function score({ makeProcess, freePort, forName, profiles, candidates, isCancelled, onProgress, batch = 4 }) {
+async function score({ makeProcess, freePort, forName, profiles, candidates, isCancelled, onProgress, batch = 4, probe = probeHost }) {
   const counts = {};
   for (const p of profiles) counts[p.id] = {};
+  const isFull = (p) => p.probeHosts.length === 0 || Math.max(0, ...Object.values(counts[p.id])) >= p.probeHosts.length;
 
   for (let i = 0; i < candidates.length; i += batch) {
     if (isCancelled()) break;
+    // Сервисы с полным результатом больше не проверяем: при равенстве выигрывает более ранний вариант,
+    // лучше найти уже нельзя. Так подбор быстрее, а остальным сервисам хватает времени на все варианты.
+    const remaining = profiles.filter((p) => !isFull(p));
+    if (!remaining.length) break;
     const group = candidates.slice(i, i + batch);
     const procs = [];
     try {
@@ -32,10 +37,10 @@ async function score({ makeProcess, freePort, forName, profiles, candidates, isC
       if (!procs.length) throw new Error('не удалось запустить ByeDPI');
       const tasks = [];
       for (const { strategy, port } of procs) {
-        for (const profile of profiles) {
+        for (const profile of remaining) {
           for (const host of profile.probeHosts) {
             tasks.push(async () => {
-              if (await probeHost(host, port)) {
+              if (await probe(host, port)) {
                 counts[profile.id][strategy] = (counts[profile.id][strategy] || 0) + 1;
               }
             });

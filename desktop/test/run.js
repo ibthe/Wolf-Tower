@@ -9,12 +9,12 @@ const path = require('path');
 const vm = require('vm');
 const { execFileSync } = require('child_process');
 
-const { buildGroups, loadConfig, forName, parseRaw } = require('../src/profiles');
+const { buildGroups, loadConfig, forName } = require('../src/profiles');
 const { buildPac, PacServer } = require('../src/pac');
 const { Store } = require('../src/store');
 const { License } = require('../src/license');
 const { probeHost } = require('../src/probe');
-const { chooseBest } = require('../src/autoprobe');
+const { chooseBest, score } = require('../src/autoprobe');
 const { Engine, ByeDpi, freePort } = require('../src/engine');
 
 let passed = 0;
@@ -35,21 +35,69 @@ const root = path.join(__dirname, '..', '..');
 const config = loadConfig([path.join(root, 'profiles', 'profiles.json')]);
 
 (async () => {
-  await test('профили и стратегии загружаются, по умолчанию chain+udp', () => {
-    assert.deepStrictEqual(config.profiles.map((p) => p.id), ['whatsapp']);
-    assert.strictEqual(config.defaultStrategy, 'chain+udp');
+  await test('профили и стратегии загружаются, по умолчанию disorder', () => {
+    assert(config.profiles.length >= 4);
+    assert.strictEqual(config.defaultStrategy, 'disorder');
     assert.deepStrictEqual(forName('fake+oob'), ['-f-1', '-t', '8', '-o1+s']);
     assert.deepStrictEqual(forName('none'), []);
   });
 
+  await test('пресеты из ByeByeDPI есть: цепочка разрезов с -a1 и в списке стратегий', () => {
+    assert.deepStrictEqual(forName('multisplit'), ['-d1', '-s1+s', '-s3+s', '-s6+s', '-s9+s', '-s12+s', '-s15+s', '-s20+s', '-s30+s', '-a1']);
+    for (const name of ['multisplit-short', 'multisplit', 'multidisorder']) {
+      assert(config.strategies.includes(name), name + ' должен быть в profiles.json');
+      assert(forName(name).length > 0, name + ' должен иметь аргументы');
+    }
+    for (const name of config.strategies) assert(forName(name).length > 0, 'нет аргументов для ' + name);
+  });
+
+  await test('расширенные наборы ByeByeDPI: описаны, {sni} подставляется', () => {
+    assert(config.extended.length >= 30, 'расширенных: ' + config.extended.length);
+    assert.deepStrictEqual(config.allStrategies, [...config.strategies, ...config.extended]);
+    for (const name of config.extended) {
+      const a = forName(name);
+      assert(a.length > 0, 'нет аргументов: ' + name);
+      assert(!a.join(' ').includes('{sni}'), '{sni} не подставлен: ' + name);
+      assert(!a.some((x) => x.startsWith('-A') || x.startsWith('--auto')), 'группы -A не поддерживаются: ' + name);
+    }
+    const withSni = config.extended.find((n) => forName(n).includes('-n'));
+    assert(withSni && forName(withSni)[forName(withSni).indexOf('-n') + 1] === 'www.iana.org');
+  });
+
+  await test('автоподбор: закрытые сервисы больше не проверяются, остальные идут до своего варианта', async () => {
+    const portToStrategy = {};
+    let nextPort = 1000;
+    const makeProcess = () => ({ start: async (port, args) => { portToStrategy[port] = args[0]; return true; }, stop: async () => {} });
+    const calls = [];
+    // сервис A открывается без обхода, сервис B только на варианте s6
+    const probe = async (host, port) => {
+      const strategy = portToStrategy[port];
+      calls.push(host + '@' + strategy);
+      return host.startsWith('a') ? strategy === 'none' : strategy === 's6';
+    };
+    const profiles = [{ id: 'A', name: 'A', probeHosts: ['a1', 'a2'] }, { id: 'B', name: 'B', probeHosts: ['b1'] }];
+    const candidates = ['none', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8'];
+    const progress = [];
+    const counts = await score({ makeProcess, freePort: async () => nextPort++, forName: (n) => [n], profiles, candidates,
+      isCancelled: () => false, onProgress: (n) => progress.push(n), probe });
+    assert.deepStrictEqual(counts.A, { none: 2 });
+    assert.deepStrictEqual(counts.B, { s6: 1 });
+    assert.strictEqual(calls.filter((c) => c.startsWith('a')).length, 8, 'A проверяется только в первой пачке (4 варианта x 2 адреса)');
+    assert(!calls.some((c) => c.endsWith('@s8')), 'после того как B закрыт, подбор прекращается');
+    assert.deepStrictEqual(progress, [4, 8]);
+    assert.deepStrictEqual(chooseBest(counts.B, candidates), { best: 's6', ok: 1 });
+  });
+
+  await test('автоподбор: сервис без адресов для проверки не запускает процессов', async () => {
+    let started = 0;
+    const makeProcess = () => ({ start: async () => { started++; return true; }, stop: async () => {} });
+    await score({ makeProcess, freePort: async () => 1, forName: () => [], profiles: [{ id: 'x', name: 'x', probeHosts: [] }],
+      candidates: ['none', 'a'], isCancelled: () => false, onProgress: () => {} });
+    assert.strictEqual(started, 0);
+  });
+
   await test('группы ByeDPI: как в Android (hosts, ipset, --auto=none)', () => {
-    // продукт теперь только про WhatsApp, поэтому схему групп проверяем на искусственных профилях
-    const mk = (id, domains, ipRanges = []) => ({ id, name: id, domains, ipRanges, probeHosts: [], blockQuic: false, matchAll: false });
-    const by = (id) => ({
-      whatsapp: mk('whatsapp', ['whatsapp.com', 'whatsapp.net']),
-      youtube: mk('youtube', ['youtube.com', 'googlevideo.com']),
-      telegram: mk('telegram', [], ['91.108.4.0/22']),
-    })[id];
+    const by = (id) => config.profiles.find((p) => p.id === id);
     const out = buildGroups([
       { profile: by('whatsapp'), strategy: 'disorder' },
       { profile: by('youtube'), strategy: 'none' },
@@ -61,38 +109,6 @@ const config = loadConfig([path.join(root, 'profiles', 'profiles.json')]);
     assert.strictEqual(out[3], '--auto=none');
     assert.strictEqual(out.filter((x) => x === '--ipset').length, 1);
     assert(!out.join(' ').includes('youtube.com'), 'none не должен попасть в аргументы');
-  });
-
-  await test('WhatsApp один: без фильтра по SNI (чат Noise без SNI тоже получает обход)', () => {
-    const wa = config.profiles.find((p) => p.id === 'whatsapp');
-    assert.strictEqual(wa.matchAll, true);
-    const out = buildGroups([{ profile: wa, strategy: 'chain+udp' }]);
-    assert(!out.includes('--hosts') && !out.includes('--auto=none'));
-    assert.deepStrictEqual(out.slice(0, 2), ['-d1', '-s1+s']);
-    assert.strictEqual(out[out.length - 1], '-a1');
-    // вместе с другим сервисом возвращается разбиение по группам
-    const yt = { id: 'youtube', name: 'youtube', domains: ['youtube.com'], ipRanges: [], probeHosts: [], blockQuic: false, matchAll: false };
-    const two = buildGroups([{ profile: wa, strategy: 'disorder' }, { profile: yt, strategy: 'split' }]);
-    assert.strictEqual(two[0], '--hosts');
-  });
-
-  await test('строка в стиле ByeByeDPI: разрешены флаги обхода, опасные отклоняются', () => {
-    const s = '-d1 -s1+s -s3+s -s6+s -s9+s -s12+s -s15+s -s20+s -s30+s -a1';
-    assert.deepStrictEqual(forName('raw:' + s), s.split(' '));
-    assert.deepStrictEqual(forName('chain+udp'), s.split(' '));
-    assert.deepStrictEqual(parseRaw('-f -1 -t 8 -d1+s'), ['-f', '-1', '-t', '8', '-d1+s']);
-    for (const bad of ['-i 0.0.0.0', '-p 80', '--hosts :a.com', '-H :a.com', '-A t', '-U', '-D', '-x 2', '', '-d1 -c 9']) {
-      assert.strictEqual(parseRaw(bad), null, bad);
-    }
-    assert.deepStrictEqual(forName('raw:-D'), []);
-  });
-
-  await test('все стратегии из profiles.json известны и не содержат управляющих флагов', () => {
-    for (const name of config.strategies) {
-      const args = forName(name);
-      assert(args.length > 0, name);
-      assert.notStrictEqual(parseRaw(args.join(' ')), null, name);
-    }
   });
 
   await test('PAC: только домены выбранных сервисов идут через прокси', () => {
@@ -275,8 +291,9 @@ const config = loadConfig([path.join(root, 'profiles', 'profiles.json')]);
     fs.copyFileSync(bin, path.join(resDir, 'bin', process.platform, process.platform === 'win32' ? 'ciadpi.exe' : 'ciadpi'));
     fs.chmodSync(path.join(resDir, 'bin', process.platform, 'ciadpi'), 0o755);
     const store = new Store(path.join(tmp, 'eng'));
-    store.set('enabled', ['whatsapp']);
-    store.set('strategy_whatsapp', 'chain+udp');
+    store.set('enabled', ['whatsapp', 'telegram']);
+    store.set('strategy_whatsapp', 'disorder');
+    store.set('strategy_telegram', 'oob');
     store.set('socksPort', await freePort());
     const engine = new Engine({ resourcesDir: resDir, store, config });
     const logs = [];

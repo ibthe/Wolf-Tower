@@ -1,66 +1,56 @@
 const $ = (id) => document.getElementById(id);
 let S = null;
 let logOpen = false;
-let advOpen = false;
 let keyOpen = null; // null: решает состояние лицензии
-let justActivated = false;
 let logs = [];
-let rawTouched = false;
 
-function plural(n, one, few, many) {
-  const m100 = n % 100;
-  const m10 = n % 10;
-  if (m100 >= 11 && m100 <= 14) return many;
-  if (m10 === 1) return one;
-  if (m10 >= 2 && m10 <= 4) return few;
-  return many;
+function el(tag, attrs = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k === 'onclick') e.addEventListener('click', v);
+    else if (k === 'checked' || k === 'disabled') e[k] = !!v;
+    else e.setAttribute(k, v);
+  }
+  for (const c of children) e.append(c);
+  return e;
 }
 
-/** "142 дня" / "5 часов" до конца срока; null, если лицензия бессрочная или срок вышел. */
-function leftText(untilMs) {
-  if (typeof untilMs !== 'number') return null;
-  const ms = untilMs - Date.now();
-  if (ms <= 0) return null;
-  const d = Math.floor(ms / 86400000);
-  if (d >= 1) return `${d} ${plural(d, 'день', 'дня', 'дней')}`;
-  const h = Math.max(1, Math.floor(ms / 3600000));
-  return `${h} ${plural(h, 'час', 'часа', 'часов')}`;
-}
-
-function strategyLabel(s) {
-  if (s === 'none') return 'без обхода';
-  if (s.startsWith('raw:')) return 'своя строка';
-  return s;
-}
-
-/** Кнопка «копировать»: значок меняется на галочку, подпись на «Скопировано», через 2 с всё возвращается. */
-function setupCopyButton(btn, getText) {
-  const lbl = btn.querySelector('.lbl');
-  const normal = lbl.textContent;
-  let timer = null;
-  btn.addEventListener('click', async () => {
-    await window.wt.copyText(getText());
-    btn.classList.add('copied');
-    lbl.textContent = 'Скопировано';
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      btn.classList.remove('copied');
-      lbl.textContent = normal;
-    }, 2000);
-  });
-}
-
-function renderChips(profile) {
-  const box = $('chips');
+function renderServices() {
+  const box = $('services');
   box.textContent = '';
-  const cur = S.chosen[profile.id];
-  for (const s of ['none', ...S.strategies]) {
-    const b = document.createElement('button');
-    b.className = 'chip' + (s === cur ? ' on' : '');
-    b.disabled = S.running;
-    b.textContent = strategyLabel(s);
-    b.addEventListener('click', () => window.wt.setStrategy(profile.id, s));
-    box.append(b);
+  for (const p of S.profiles) {
+    const on = S.enabled.includes(p.id);
+    const sw = el(
+      'label',
+      { class: 'switch' },
+      el('input', {
+        type: 'checkbox',
+        checked: on,
+        disabled: S.running,
+        onclick: (e) => window.wt.toggleProfile(p.id, e.target.checked),
+      }),
+      el('span', { class: 'slider' })
+    );
+    const card = el('section', { class: 'card' }, el('div', { class: 'svc-head' }, el('span', { class: 'svc-name' }, p.name), sw));
+    if (on) {
+      const cur = S.chosen[p.id];
+      const score = S.probe.scores && S.probe.scores[p.id] ? ` (проверка: ${S.probe.scores[p.id]})` : '';
+      card.append(el('div', { class: 'small muted' }, 'Стратегия: ' + (cur === 'none' ? 'без обхода' : cur) + score));
+      const chips = el('div', { class: 'chips' });
+      const extra = cur !== 'none' && !S.strategies.includes(cur) ? [cur] : [];
+      for (const s of ['none', ...S.strategies, ...extra]) {
+        chips.append(
+          el(
+            'button',
+            { class: 'chip' + (s === cur ? ' on' : ''), disabled: S.running, onclick: () => window.wt.setStrategy(p.id, s) },
+            s === 'none' ? 'без обхода' : s
+          )
+        );
+      }
+      card.append(chips);
+    }
+    box.append(card);
   }
 }
 
@@ -79,71 +69,36 @@ function renderLog() {
 
 function render() {
   if (!S) return;
-  const profile = S.profiles[0];
+  $('status').textContent = S.running ? 'Защита включена' : 'Защита выключена';
   const canRun = S.license.licensed;
-  const busy = S.busy || S.probe.running;
-
-  // ----- кнопка и статус
   const t = $('toggle');
-  t.classList.toggle('on', S.running);
-  t.classList.toggle('busy', busy);
-  t.disabled = busy || (!S.running && !canRun);
-  const head = $('status');
-  head.textContent = S.running
-    ? 'Защита включена'
-    : S.probe.running
-      ? 'Подбор стратегии…'
-      : S.busy
-        ? 'Проверка лицензии…'
-        : 'Защита выключена';
-  head.classList.toggle('on-text', S.running);
-  $('hint').textContent = S.running
-    ? 'WhatsApp идёт через обход'
-    : !canRun
-      ? 'Для запуска введите лицензионный ключ'
-      : 'Нажмите кнопку, чтобы разблокировать WhatsApp';
-  $('hint').classList.toggle('amber', !S.running && !canRun);
+  t.textContent = S.running ? 'Остановить' : S.busy ? 'Подождите…' : 'Запустить';
+  t.disabled = S.busy || S.probe.running || (!S.running && !canRun);
+  $('hint').textContent =
+    !S.running && S.enabled.length === 0 ? 'Включите хотя бы один сервис ниже' : '';
 
-  // ----- лицензия: после активации поля ключа убираются, остаётся только срок
-  const showKey = keyOpen === null ? !canRun : keyOpen;
-  $('licenseChip').hidden = !(canRun && !showKey);
-  $('keyCard').hidden = !showKey;
-  if (canRun) {
-    const left = leftText(S.license.untilMs);
-    const soon = typeof S.license.untilMs === 'number' && S.license.untilMs - Date.now() < 7 * 86400000;
-    $('licenseChip').classList.toggle('soon', soon);
-    $('licTitle').textContent = justActivated ? 'Ключ принят' : S.license.plan === 'trial' ? 'Пробная лицензия' : 'Лицензия активна';
-    $('licSub').textContent = left ? `Осталось ${left}` : 'Бессрочная';
-  }
-  $('licenseText').textContent = canRun ? '' : S.license.text;
-  $('licenseText').hidden = canRun;
+  $('licenseText').textContent = S.license.text;
   $('deviceId').textContent = S.license.deviceId;
-  $('keyCancel').hidden = !(canRun && showKey);
-  $('newKeyBtn').hidden = !(canRun && !showKey);
+  const showKey = keyOpen === null ? !S.license.licensed : keyOpen;
+  $('keyBox').hidden = !showKey;
+  $('newKeyBtn').hidden = !(S.license.licensed && !showKey);
 
-  // ----- стратегия
-  const cur = S.chosen[profile.id];
-  const score = S.probe.scores && S.probe.scores[profile.id] ? ` (проверка: ${S.probe.scores[profile.id]})` : '';
-  $('strategyNow').textContent = `Сейчас: ${strategyLabel(cur)}${score}`;
-  $('probeBtn').disabled = S.running || S.probe.running || !canRun;
+  renderServices();
+
+  const probeBtn = $('probeBtn');
+  probeBtn.disabled = S.running || S.probe.running || S.enabled.length === 0 || !canRun;
   $('probeProgress').textContent = S.probe.running ? S.probe.progress : '';
   $('probeCancel').hidden = !S.probe.running;
   $('probeReport').textContent = S.probe.report || '';
-  $('probeReport').hidden = !S.probe.report;
 
-  // ----- дополнительно
-  $('adv').hidden = !advOpen;
-  $('advToggle').classList.toggle('open', advOpen);
-  if (advOpen) {
-    renderChips(profile);
-    $('rawApply').disabled = S.running;
-    if (!rawTouched && cur.startsWith('raw:')) $('rawInput').value = cur.slice(4);
-  }
+  $('tgCard').hidden = !S.enabled.includes('telegram');
+  $('tgPort').textContent = S.port;
+
   $('platformNote').textContent =
     S.platform === 'darwin'
       ? 'При первом включении защиты macOS попросит пароль администратора для настройки прокси.'
       : S.platform === 'win32'
-        ? 'Приложение WhatsApp из Microsoft Store системный прокси не видит: используйте WhatsApp Web в браузере.'
+        ? 'Универсальные приложения Microsoft Store могут не видеть прокси: используйте браузер.'
         : '';
   renderLog();
 }
@@ -151,21 +106,14 @@ function render() {
 $('toggle').addEventListener('click', () => window.wt.toggleProtection());
 $('probeBtn').addEventListener('click', () => window.wt.startProbe());
 $('probeCancel').addEventListener('click', () => window.wt.cancelProbe());
-$('advToggle').addEventListener('click', () => {
-  advOpen = !advOpen;
-  render();
-});
 $('newKeyBtn').addEventListener('click', () => {
   keyOpen = true;
   render();
 });
-$('keyCancel').addEventListener('click', () => {
-  keyOpen = null;
-  $('licenseMsg').textContent = '';
-  render();
+$('copyId').addEventListener('click', async () => {
+  await window.wt.copyText(S.license.deviceId);
+  $('licenseMsg').textContent = 'ID скопирован';
 });
-setupCopyButton($('copyId'), () => S.license.deviceId);
-setupCopyButton($('logCopy'), () => logs.join('\n'));
 $('paste').addEventListener('click', async () => {
   $('keyInput').value = (await window.wt.paste()).trim();
 });
@@ -176,55 +124,28 @@ $('activate').addEventListener('click', async () => {
   const err = await window.wt.activate($('keyInput').value);
   btn.disabled = false;
   btn.textContent = 'Активировать';
-  $('licenseMsg').textContent = err || '';
+  $('licenseMsg').textContent = err || 'Ключ принят';
   if (!err) {
     $('keyInput').value = '';
     keyOpen = null;
-    justActivated = true;
-    setTimeout(() => {
-      justActivated = false;
-      render();
-    }, 3000);
-    render();
   }
 });
-$('rawInput').addEventListener('input', () => {
-  rawTouched = true;
-  $('rawErr').textContent = '';
-});
-$('rawApply').addEventListener('click', async () => {
-  const text = $('rawInput').value.trim();
-  if (!text) return;
-  const ok = await window.wt.setStrategy(S.profiles[0].id, 'raw:' + text);
-  $('rawErr').textContent = ok ? '' : 'Допустимы только флаги обхода: -s -d -o -q -f -t -r -a и т.п.';
-  if (ok) rawTouched = false;
-});
+$('tgAdd').addEventListener('click', () => window.wt.telegramAdd());
+$('tgCopy').addEventListener('click', () => window.wt.copyText(`127.0.0.1:${S.port}`));
 $('logToggle').addEventListener('click', () => {
   logOpen = !logOpen;
   renderLog();
 });
+$('logCopy').addEventListener('click', () => window.wt.copyText(logs.join('\n')));
 $('logClear').addEventListener('click', async () => {
   await window.wt.clearLog();
   logs = [];
   renderLog();
 });
-// диагностика копируется в основном процессе; значок на кнопке меняется так же, как у остальных
-(() => {
-  const btn = $('diag');
-  const lbl = btn.querySelector('.lbl');
-  const normal = lbl.textContent;
-  let timer = null;
-  btn.addEventListener('click', async () => {
-    await window.wt.copyDiag();
-    btn.classList.add('copied');
-    lbl.textContent = 'Скопировано';
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      btn.classList.remove('copied');
-      lbl.textContent = normal;
-    }, 2000);
-  });
-})();
+$('diag').addEventListener('click', async () => {
+  await window.wt.copyDiag();
+  $('diagMsg').textContent = 'Диагностика скопирована в буфер обмена: вставьте её в сообщение поддержке (без IP-адресов, трафика и ключа).';
+});
 $('licensesToggle').addEventListener('click', async () => {
   const pre = $('licensesText');
   pre.hidden = !pre.hidden;

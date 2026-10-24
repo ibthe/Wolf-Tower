@@ -63,8 +63,17 @@ object AutoProbe {
         profiles.forEach { okCounts[it.id] = HashMap() }
         var checked = 0
 
+        fun isFull(p: Profile): Boolean {
+            val total = p.probeHosts.size
+            return total == 0 || (okCounts.getValue(p.id).values.maxOrNull() ?: 0) >= total
+        }
+
         for (batch in candidates.chunked(BATCH)) {
             if (isCancelled()) break
+            // Сервисы с полным результатом больше не проверяем: при равенстве выигрывает более ранний вариант,
+            // лучше найти уже нельзя. Так подбор быстрее, а остальным сервисам хватает времени на все варианты.
+            val remaining = profiles.filter { !isFull(it) }
+            if (remaining.isEmpty()) break
             val procs = ArrayList<Pair<String, ByeDpiProcess>>()
             val ports = HashMap<String, Int>()
             try {
@@ -83,7 +92,7 @@ object AutoProbe {
                 try {
                     val jobs = ArrayList<Triple<String, String, Future<Boolean>>>()
                     for ((strategy, _) in procs) {
-                        for (profile in profiles) {
+                        for (profile in remaining) {
                             for (host in profile.probeHosts) {
                                 val port = ports.getValue(strategy)
                                 jobs.add(
@@ -140,9 +149,6 @@ object AutoProbe {
             var best: String? = null
             var bestOk = 0
             for (s in candidates) {
-                // Проба смотрит только TLS-адреса. Для match_all-сервиса (WhatsApp) "без обхода" не выбираем:
-                // сайт может открываться, а чат (Noise, без SNI) нет.
-                if (s == "none" && profile.matchAll) continue
                 val c = counts[s] ?: 0
                 if (c > bestOk) {
                     best = s

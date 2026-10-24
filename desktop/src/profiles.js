@@ -15,37 +15,18 @@ const LIBRARY = {
   'fake+tlsrec': ['-f-1', '-t', '8', '-r1+s'],
   'fake4+disorder': ['-f-1', '-t', '4', '-d1+s'],
   'fake12+disorder': ['-f-1', '-t', '12', '-d1+s'],
-  // Абсолютные смещения работают и на трафике без SNI (WhatsApp-чат идёт по Noise, не по TLS).
-  disorder0: ['-d1'],
-  split0: ['-s1'],
-  // Цепочка мелких фрагментов + 1 поддельный UDP-пакет (-a1) для звонков.
-  chain: ['-d1', '-s1+s', '-s3+s', '-s6+s', '-s9+s', '-s12+s', '-s15+s', '-s20+s', '-s30+s'],
-  'chain+udp': ['-d1', '-s1+s', '-s3+s', '-s6+s', '-s9+s', '-s12+s', '-s15+s', '-s20+s', '-s30+s', '-a1'],
-  'disorder0+udp': ['-d1', '-a1'],
-  'split+udp': ['-s1+s', '-a1'],
-  'disorder+udp': ['-d1+s', '-a1'],
+  'multisplit-short': ['-d1', '-s1+s', '-s3+s', '-s6+s'],
+  'multisplit': ['-d1', '-s1+s', '-s3+s', '-s6+s', '-s9+s', '-s12+s', '-s15+s', '-s20+s', '-s30+s', '-a1'],
+  'multidisorder': ['-d1', '-d3+s', '-d6+s', '-d9+s', '-d12+s', '-d15+s', '-d20+s', '-d30+s'],
 };
 
-const RAW_PREFIX = 'raw:';
-// Разрешены только флаги самого обхода; фильтры групп, порты и режимы задаёт приложение.
-const RAW_ALLOWED = 'sdoqftSnlOQeMrmaYR';
-
-/** Строка в стиле ByeByeDPI ("raw:-d1 -s1+s -a1") -> аргументы или null, если есть недопустимые флаги. */
-function parseRaw(text) {
-  if (typeof text !== 'string' || text.length > 400) return null;
-  const tokens = text.trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length || tokens.length > 40) return null;
-  for (const tk of tokens) {
-    if (tk.startsWith('--')) return null;
-    if (tk[0] === '-' && tk.length >= 2 && !/[0-9]/.test(tk[1]) && !RAW_ALLOWED.includes(tk[1])) return null;
-  }
-  return tokens;
-}
+// Имя для фальшивых пакетов (подставляется вместо {sni} в наборах); можно переопределить в profiles.json (fake_sni)
+let fakeSni = 'www.iana.org';
 
 /** "none" и неизвестные имена = без обхода. */
 function forName(name) {
-  if (typeof name === 'string' && name.startsWith(RAW_PREFIX)) return parseRaw(name.slice(RAW_PREFIX.length)) || [];
-  return LIBRARY[name] || [];
+  const raw = LIBRARY[name];
+  return raw ? raw.map((x) => x.replace('{sni}', fakeSni)) : [];
 }
 
 /**
@@ -59,12 +40,6 @@ function buildGroups(selection) {
     if (out.length) out.push('--auto=none');
     out.push(flag, ':' + value, ...forName(strategy));
   };
-  const active = selection.filter((s) => s.strategy !== 'none');
-  // Один активный сервис с match_all: без фильтра по SNI, иначе соединения без SNI (чат WhatsApp) не получают обхода.
-  if (active.length === 1 && active[0].profile.matchAll) {
-    out.push(...forName(active[0].strategy));
-    return out;
-  }
   for (const { profile, strategy } of selection) {
     if (strategy === 'none') continue;
     if (profile.domains.length) group('--hosts', profile.domains.join(' '), strategy);
@@ -74,6 +49,9 @@ function buildGroups(selection) {
 }
 
 function parseConfig(json) {
+  // Описания стратегий лежат в profiles.json: новые наборы добавляются без правки кода
+  if (json.strategy_args) Object.assign(LIBRARY, json.strategy_args);
+  if (json.fake_sni) fakeSni = json.fake_sni;
   const profiles = (json.profiles || []).map((o) => ({
     id: o.id,
     name: o.name,
@@ -81,11 +59,12 @@ function parseConfig(json) {
     ipRanges: o.ip_ranges || [],
     probeHosts: o.probe_hosts || [],
     blockQuic: !!o.block_quic,
-    matchAll: !!o.match_all,
   }));
   const strategies = json.strategies || [];
-  const defaultStrategy = strategies[0];
-  return { profiles, strategies, defaultStrategy };
+  // Расширенные наборы: в ручном выборе не показываются, но проверяются автоподбором
+  const extended = json.strategies_extended || [];
+  const defaultStrategy = strategies.includes('disorder') ? 'disorder' : strategies[0];
+  return { profiles, strategies, extended, allStrategies: [...strategies, ...extended], defaultStrategy };
 }
 
 function loadConfig(paths) {
@@ -99,4 +78,4 @@ function loadConfig(paths) {
   throw new Error('Не найден profiles.json');
 }
 
-module.exports = { LIBRARY, forName, parseRaw, buildGroups, parseConfig, loadConfig };
+module.exports = { LIBRARY, forName, buildGroups, parseConfig, loadConfig };

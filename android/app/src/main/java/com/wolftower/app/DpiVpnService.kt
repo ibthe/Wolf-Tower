@@ -204,12 +204,12 @@ class DpiVpnService : VpnService() {
                 this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
             )
             val action = Notification.Action.Builder(
-                Icon.createWithResource(this, R.drawable.ic_tile), "Остановить", stop
+                Icon.createWithResource(this, R.drawable.ic_stat_wolf), "Остановить", stop
             ).build()
             val n = Notification.Builder(this, CHANNEL)
                 .setContentTitle("Wolf Tower")
                 .setContentText("Защита включена")
-                .setSmallIcon(R.drawable.ic_tile)
+                .setSmallIcon(R.drawable.ic_stat_wolf)
                 .setOngoing(true)
                 .setContentIntent(open)
                 .addAction(action)
@@ -269,7 +269,7 @@ class DpiVpnService : VpnService() {
 
     private fun healProfile(config: ProfilesConfig, p: Profile) {
         val current = sessionOverrides[p.id] ?: Settings.strategyFor(this, p.id, config.defaultStrategy)
-        val candidates = ((if (p.matchAll) emptyList() else listOf("none")) + config.strategies).filter { it != current }
+        val candidates = (listOf("none") + config.allStrategies).filter { it != current }
         appendLog("Проблема с ${p.name}, подбираю другую стратегию…")
         val counts = AutoProbe.score(this, listOf(p), candidates, { Thread.currentThread().isInterrupted }) { }
             .getValue(p.id)
